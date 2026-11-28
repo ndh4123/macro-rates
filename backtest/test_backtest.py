@@ -40,12 +40,40 @@ def test_stop_loss():
     crash = up[-1] * np.linspace(1, 0.80, 30)[1:]
     flat = np.full(len(DAYS) - len(up) - len(crash), crash[-1])
     p, r = make(np.concatenate([up, crash, flat]))
-    eq, tr = run_backtest(p, r, cfg())
+    eq, tr = run_backtest(p, r, cfg(손절_기준="매수가"))
     st = tr[tr["사유"].astype(str).str.startswith("손절")]
     assert len(st) >= 1, tr
     first = st.iloc[0]
     assert first["손익률"] <= -10 and first["손익률"] > -12, first
-    print(f"OK 손절: {first['날짜']:%Y-%m-%d} 손익률 {first['손익률']:.1f}%")
+    print(f"OK 손절(매수가 기준): {first['날짜']:%Y-%m-%d} 손익률 {first['손익률']:.1f}%")
+
+
+def test_trailing_stop():
+    """고점 기준: 산 뒤 최고가에서 -10% 빠지면, 매수가보다 위여도 판다."""
+    up = 100 * 1.002 ** np.arange(500)                     # 크게 오른 뒤
+    down = up[-1] * np.linspace(1, 0.85, 20)[1:]           # 고점 대비 -15%
+    flat = np.full(len(DAYS) - len(up) - len(down), down[-1])
+    p, r = make(np.concatenate([up, down, flat]))
+    eq, tr = run_backtest(p, r, cfg(모멘텀_사용=False))
+    st = tr[tr["사유"].astype(str).str.startswith("손절(고점")]
+    assert len(st) >= 1, tr
+    first = st.iloc[0]
+    peak = p.loc[:first["날짜"]].max()
+    drop = (first["가격"] / peak - 1) * 100
+    assert -12 < drop <= -10 and first["손익률"] > 0, (drop, first)
+    eq2, tr2 = run_backtest(p, r, cfg(모멘텀_사용=False, 손절_기준="매수가"))
+    assert tr2["사유"].astype(str).str.startswith("손절").sum() == 0   # 매수가 기준이면 안 걸림
+    print(f"OK 고점 손절: 고점 대비 {drop:.1f}%에서 매도, 그래도 수익 {first['손익률']:.1f}% (매수가 기준이면 0회)")
+
+
+def test_momentum_off():
+    """모멘텀을 끄면 하락장에서도 모멘텀 매도가 없다."""
+    up = 100 * 1.002 ** np.arange(500)
+    down = up[-1] * 0.999 ** np.arange(1, len(DAYS) - 500 + 1)
+    p, r = make(np.concatenate([up, down]))
+    eq, tr = run_backtest(p, r, cfg(손절_사용=False, 모멘텀_사용=False))
+    assert (tr["사유"] == "모멘텀 약세").sum() == 0 and (eq["주식평가"] > 0).iloc[-1]
+    print("OK 모멘텀 끄기: 모멘텀 매도 0회, 끝까지 보유")
 
 
 def test_rate_filter():
@@ -80,4 +108,6 @@ if __name__ == "__main__":
     test_stop_loss()
     test_rate_filter()
     test_momentum_exit()
+    test_trailing_stop()
+    test_momentum_off()
     print("모든 시험 통과")
