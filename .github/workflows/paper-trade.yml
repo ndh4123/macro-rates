@@ -1,0 +1,59 @@
+# 고점손절 전략 모의투자를 평일마다 자동으로 돌려서 결과를 paper-log 브랜치에 저장
+# (main 브랜치는 금리 장부가 매일 올라가니 건드리지 않음)
+name: 모의투자 매일 기록
+
+on:
+  schedule:
+    - cron: "30 8 * * 1-5"   # 평일 08:30 UTC = 한국시간 17:30 (장 끝나고 2시간 뒤)
+  workflow_dispatch: {}      # Actions 화면에서 'Run workflow' 버튼으로 바로 실행
+
+permissions:
+  contents: write
+
+concurrency:
+  group: paper-trade
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: 부품 설치
+        run: pip install pandas numpy finance-datareader
+
+      - name: 지난 기록 가져오기 (paper-log 브랜치)
+        run: |
+          git config user.name "paper-trade-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin paper-log; then
+            git fetch origin paper-log
+            git worktree add log FETCH_HEAD
+          else
+            git worktree add --detach log HEAD
+            cd log && git checkout --orphan paper-log && git rm -rfq . && cd ..
+          fi
+
+      - name: 모의투자 계산
+        run: |
+          cd backtest
+          python paper_trade.py --dir ../log
+          if [ -f ../log/요약.md ]; then cp ../log/요약.md ../log/README.md; fi
+
+      - name: 결과 저장
+        run: |
+          cd log
+          git add -A
+          if git diff --cached --quiet; then
+            echo "바뀐 것 없음 (휴장일이거나 이미 기록됨)"
+          else
+            git commit -q -m "모의투자 기록 $(TZ=Asia/Seoul date +%Y-%m-%d)"
+            git push origin HEAD:paper-log
+          fi

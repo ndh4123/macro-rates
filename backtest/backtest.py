@@ -163,7 +163,7 @@ def run_backtest(price, rates, cfg):
     start = max(pd.Timestamp(cfg["시작일"]), df.index[0] + pd.DateOffset(months=m))
     end = pd.Timestamp(cfg["종료일"]) if cfg["종료일"] else df.index[-1]
     days = df.loc[start:end].index
-    if len(days) < 30:
+    if len(days) < cfg.get("최소_시험일수", 30):
         sys.exit("시험 기간 데이터가 너무 적습니다. 시작일/종료일을 확인하세요.")
 
     cost = cfg["거래비용_퍼센트"] / 100
@@ -218,7 +218,12 @@ def run_backtest(price, rates, cfg):
             pending = None
 
         # ---- 2) 오늘 종가 기준으로 내일 할 일 판단 ----
-        is_month_end = (i + 1 == len(days)) or (days[i + 1].month != day.month)
+        if i + 1 < len(days):
+            is_month_end = days[i + 1].month != day.month
+        elif cfg.get("마지막날_월말판단"):      # 모의투자: 내일이 아직 없으니 달력으로 판단
+            is_month_end = cfg["마지막날_월말판단"](day)
+        else:                                   # 백테스트: 데이터 마지막 날은 월말로 취급
+            is_month_end = True
 
         # (a) 손절: 평균 매수가(또는 보유 중 고점) 대비 -10%
         if shares > 0:
@@ -255,7 +260,11 @@ def run_backtest(price, rates, cfg):
 
         value = cash + shares * p
         records.append(dict(날짜=day, 평가금액=value, 현금=cash, 주식평가=shares * p,
-                            가격=p, 국고3년=row["국고3년"], 금리급등=bool(row["금리급등"])))
+                            가격=p, 국고3년=row["국고3년"], 금리급등=bool(row["금리급등"]),
+                            보유수량=shares, 고점=peak if shares > 0 else np.nan,
+                            손절선=base * (1 - stop) if (shares > 0 and cfg["손절_사용"]) else np.nan,
+                            내일주문="" if pending is None else
+                            f"{'전량매도' if pending[0] == 'SELL_ALL' else '매수'} ({pending[1]})"))
 
     eq = pd.DataFrame(records).set_index("날짜")
     tr = pd.DataFrame(trades)
