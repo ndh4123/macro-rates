@@ -256,7 +256,7 @@ def run_backtest(price, rates, cfg):
         if pending is None and mode == "주식" and splits_left > 0:
             days_since_split += 1
             if days_since_split >= gap:
-                pending = ("BUY_SPLIT", "모멘텀 강세")
+                pending = ("BUY_SPLIT", "모멘텀 강세" if cfg["모멘텀_사용"] else "월말 매수")
 
         value = cash + shares * p
         records.append(dict(날짜=day, 평가금액=value, 현금=cash, 주식평가=shares * p,
