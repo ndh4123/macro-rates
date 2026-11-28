@@ -16,7 +16,8 @@ SETTINGS = {
     # --- 시험 대상 ---
     "종목코드": "069500",          # KODEX 200 (코스피200 ETF)
     "종목이름": "KODEX 200",
-    "시작일": "2003-01-01",        # 이 날짜 이후 데이터로 시험 (모멘텀 계산에 12개월이 더 필요)
+    "시작일": "2003-01-01",        # 이 날짜부터 시험. 데이터가 더 늦게 시작하면 자동으로 늦춰짐
+                                   # (첫 12개월은 모멘텀 계산용이라 그 뒤부터 매매)
     "종료일": None,                # None = 데이터 끝까지
     "초기자금": 10_000_000,        # 1,000만 원
 
@@ -35,7 +36,9 @@ SETTINGS = {
 
     # --- ④ 손절 ---
     "손절_사용": True,
-    "손절_퍼센트": 10.0,           # 평균 매수가 대비 -10% 이면 전량 매도
+    "손절_퍼센트": 10.0,           # -10% 떨어지면 전량 매도
+    "손절_기준": "매수가",         # "매수가" = 평균 매수가 대비 -10%
+                                   # "고점"   = 산 뒤 가장 높았던 가격 대비 -10% (추적 손절, 수익 지키기용)
 
     # --- 비용·현금 ---
     "거래비용_퍼센트": 0.10,       # 사고팔 때마다 수수료+슬리피지 합쳐 0.10% 가정
@@ -84,36 +87,44 @@ def load_rates():
 
 
 def load_prices(code):
-    """종가 데이터. data/prices_<코드>.csv 가 있으면 그걸 쓰고, 없으면 인터넷에서 받아 저장."""
+    """
+    종가 데이터. data/prices_<코드>.csv 가 있으면 그걸 쓰고, 없으면 인터넷에서 받아 저장.
+    CSV에 AdjClose(배당 반영 수정주가) 칸이 있으면 그걸 우선 사용 → 배당을 다시 투자한 효과까지 계산.
+    """
     DATA_DIR.mkdir(exist_ok=True)
     path = DATA_DIR / f"prices_{code}.csv"
     if path.exists():
-        df = pd.read_csv(path, parse_dates=["Date"])
-        return df.set_index("Date")["Close"].astype(float).sort_index()
+        df = pd.read_csv(path, parse_dates=["Date"]).set_index("Date").sort_index()
+        col = "AdjClose" if "AdjClose" in df.columns else "Close"
+        print(f"[데이터] {path.name} 사용 ({'배당 반영' if col == 'AdjClose' else '배당 미반영'} 가격, {len(df)}일치)")
+        return df[col].astype(float)
 
     print(f"[데이터] {code} 주가를 인터넷에서 받는 중...")
-    s = None
-    try:
-        import FinanceDataReader as fdr   # 네이버/KRX 데이터
-        s = fdr.DataReader(code, "2000-01-01")["Close"]
+    out = None
+    try:   # 1순위: 야후 파이낸스 (배당 반영 수정주가 제공)
+        import yfinance as yf
+        d = yf.download(f"{code}.KS", start="2000-01-01", auto_adjust=False, progress=False)
+        if len(d):
+            out = pd.DataFrame({"Close": d["Close"].squeeze(), "AdjClose": d["Adj Close"].squeeze()})
     except Exception as e:
-        print(f"  - FinanceDataReader 실패: {e}")
-    if s is None or len(s) == 0:
-        try:
-            import yfinance as yf
-            d = yf.download(f"{code}.KS", start="2000-01-01", auto_adjust=False, progress=False)
-            s = d["Close"].squeeze()
+        print(f"  - yfinance 실패: {e}")
+    if out is None or len(out) == 0:
+        try:   # 2순위: FinanceDataReader (네이버 등, 배당 미반영)
+            import FinanceDataReader as fdr
+            d = fdr.DataReader(code, "2000-01-01")
+            out = pd.DataFrame({"Close": d["Close"]})
         except Exception as e:
-            print(f"  - yfinance 실패: {e}")
-    if s is None or len(s) == 0:
+            print(f"  - FinanceDataReader 실패: {e}")
+    if out is None or len(out) == 0:
         sys.exit("주가를 받지 못했습니다. README의 '데이터 직접 넣기'를 참고하세요.")
 
-    s = s.dropna().astype(float)
-    s.index = pd.to_datetime(s.index).tz_localize(None)
-    s.index.name = "Date"
-    s.rename("Close").to_frame().to_csv(path)
-    print(f"  - 저장 완료: {path}  ({len(s)}일치)")
-    return s.sort_index()
+    out = out.dropna().astype(float)
+    out.index = pd.to_datetime(out.index).tz_localize(None)
+    out.index.name = "Date"
+    out.to_csv(path)
+    print(f"  - 저장 완료: {path}  ({len(out)}일치)")
+    col = "AdjClose" if "AdjClose" in out.columns else "Close"
+    return out[col].sort_index()
 
 
 # ---------------------------------------------------------------------
@@ -147,7 +158,8 @@ def run_backtest(price, rates, cfg):
         past = series.loc[:past_day]
         return None if past.empty else past.iloc[-1]
 
-    start = pd.Timestamp(cfg["시작일"])
+    # 모멘텀 계산에 과거 m개월 데이터가 필요하므로, 데이터 시작 + m개월 이후부터 시험
+    start = max(pd.Timestamp(cfg["시작일"]), df.index[0] + pd.DateOffset(months=m))
     end = pd.Timestamp(cfg["종료일"]) if cfg["종료일"] else df.index[-1]
     days = df.loc[start:end].index
     if len(days) < 30:
@@ -161,6 +173,7 @@ def run_backtest(price, rates, cfg):
     cash = float(cfg["초기자금"])
     shares = 0.0
     avg_cost = 0.0
+    peak = 0.0               # 보유 중 최고 종가 (추적 손절용)
     mode = "현금"            # "현금" 또는 "주식"
     splits_left = 0          # 남은 분할매수 횟수
     split_amount = 0.0
@@ -184,7 +197,7 @@ def run_backtest(price, rates, cfg):
                                    수량=shares, 금액=proceeds,
                                    손익률=(p / avg_cost - 1) * 100))
                 cash += proceeds
-                shares, avg_cost = 0.0, 0.0
+                shares, avg_cost, peak = 0.0, 0.0, 0.0
                 splits_left = 0
             elif kind == "BUY_SPLIT" and splits_left > 0:
                 if row["금리급등"]:
@@ -206,9 +219,12 @@ def run_backtest(price, rates, cfg):
         # ---- 2) 오늘 종가 기준으로 내일 할 일 판단 ----
         is_month_end = (i + 1 == len(days)) or (days[i + 1].month != day.month)
 
-        # (a) 손절: 평균 매수가 대비 -10%
-        if cfg["손절_사용"] and shares > 0 and p <= avg_cost * (1 - stop):
-            pending = ("SELL_ALL", f"손절(-{cfg['손절_퍼센트']:.0f}%)")
+        # (a) 손절: 평균 매수가(또는 보유 중 고점) 대비 -10%
+        if shares > 0:
+            peak = max(peak, p)
+        base = peak if cfg["손절_기준"] == "고점" else avg_cost
+        if cfg["손절_사용"] and shares > 0 and p <= base * (1 - stop):
+            pending = ("SELL_ALL", f"손절({cfg['손절_기준']} -{cfg['손절_퍼센트']:.0f}%)")
             mode = "현금"   # 다음 달 점검 때까지 재진입 안 함
 
         # (b) 매달 마지막 거래일: 듀얼모멘텀 점검
@@ -261,8 +277,19 @@ def won(x):
     return f"{x:,.0f}원"
 
 
+def apply_cli(cfg):
+    """python backtest.py KOSPI  처럼 종목코드를 뒤에 붙이면 그 데이터로 시험 (data/prices_<코드>.csv)."""
+    if len(sys.argv) > 1:
+        cfg["종목코드"] = sys.argv[1]
+        cfg["종목이름"] = sys.argv[1] if sys.argv[1] != SETTINGS_DEFAULT_CODE else cfg["종목이름"]
+    return cfg
+
+
+SETTINGS_DEFAULT_CODE = SETTINGS["종목코드"]
+
+
 def main():
-    cfg = SETTINGS
+    cfg = apply_cli(dict(SETTINGS))
     OUT_DIR.mkdir(exist_ok=True)
 
     rates = load_rates()
