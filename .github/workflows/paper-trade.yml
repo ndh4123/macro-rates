@@ -5,6 +5,8 @@ name: 모의투자 매일 기록
 on:
   schedule:
     - cron: "30 8 * * 1-5"   # 평일 08:30 UTC = 한국시간 17:30 (장 끝나고 2시간 뒤)
+  push:
+    branches: [claude/project-thread-17lgaw]   # 임시: PR 시험용
   workflow_dispatch: {}      # Actions 화면에서 'Run workflow' 버튼으로 바로 실행
 
 permissions:
@@ -20,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
 
       - uses: actions/setup-python@v5
         with:
